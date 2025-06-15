@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "shandong-remote-analysis": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "http://172.20.70.142:8000/messages/",
+        "-H", "Content-Type: application/json",
+        "-d", "@-"
+      ],
+      "transport": "http",
+      "url": "http://172.20.70.142:8000/sse",
+      "description": "山东耕地流出分析MCP服务器 - 远程HTTP连接"
+    }
+  }
+} 

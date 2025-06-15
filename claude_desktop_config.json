@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "shandong-analysis": {
+      "command": "python3",
+      "args": [
+        "/Users/sxc/shandong-mcp-server/shandong_mcp_server_enhanced.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/sxc/shandong-mcp-server"
+      }
+    }
+  }
+} 
