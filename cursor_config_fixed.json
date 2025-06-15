@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "shandong-remote": {
+      "type": "sse", 
+      "url": "http://172.20.70.142:8000"
+    }
+  }
+} 
