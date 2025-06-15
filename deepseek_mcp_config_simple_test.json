@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "shandong-analysis": {
+      "command": "/Users/sxc/oge-computation-ogc/venv/bin/python",
+      "args": [
+        "/Users/sxc/oge-computation-ogc/mcp_deployment/shandong_mcp_server.py"
+      ],
+      "cwd": "/Users/sxc/oge-computation-ogc/mcp_deployment"
+    }
+  }
+}

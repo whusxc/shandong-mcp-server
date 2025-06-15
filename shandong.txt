@@ -1,0 +1,42 @@
+import oge.mapclient
+from oge import apifunction
+oge.initialize()
+
+# initialize the OGC API endpoint
+service = oge.Service.initialize()
+query = r"SELECT * FROM guotubiangeng WHERE DLMC IN ('旱地', '水浇地', '水田')"
+# 后续.encode时候会被转义，str.encode('unicode-escape').decode()可以强制逃避，但可能会影响其他特殊字符
+cultivated = service.getProcess("FeatureCollection.runBigQuery").execute(query, "geom") #耕地 CGCS2000_3_Degree_GK_Zone_39
+
+# 重点管控区域 大于15度耕地 几何
+slope = service.getFeatureCollection("podu") #坡度 GCS_China_Geodetic_Coordinate_System_2000
+slope_morethan15_ = service.getProcess("FeatureCollection.filterMetadata").execute(slope, "pdjb", "greater_than", 4) #超过15度的耕地
+slope_morethan15 = service.getProcess("FeatureCollection.reproject").execute(slope_morethan15_, "EPSG:4527") #超过15度的耕地
+urban_ = service.getFeatureCollection("chengzhenkaifa") #城镇开发边界 GCS_China_Geodetic_Coordinate_System_2000
+urban = service.getProcess("FeatureCollection.reproject").execute(urban_, "EPSG:4527") #超过15度的耕地
+nature_ = service.getFeatureCollection("ziranbaohu") #自然保护地 GCS_China_Geodetic_Coordinate_System_2000
+nature = service.getProcess("FeatureCollection.reproject").execute(nature_, "EPSG:4527") #超过15度的耕地
+ecology_ = service.getFeatureCollection("shengtaibaohu") #生态保护红线 GCS_China_Geodetic_Coordinate_System_2000
+ecology = service.getProcess("FeatureCollection.reproject").execute(ecology_, "EPSG:4527") #超过15度的耕地
+
+urban_intersection = service.getProcess("FeatureCollection.intersection").execute(cultivated, urban) #流出1
+urban_erase = service.getProcess("FeatureCollection.erase").execute(cultivated, urban)
+nature_intersection = service.getProcess("FeatureCollection.intersection").execute(urban_erase, nature) #流出2
+nature_erase = service.getProcess("FeatureCollection.erase").execute(urban_erase, nature)
+ecology_intersection = service.getProcess("FeatureCollection.intersection").execute(nature_erase, ecology) ##流出3
+ecology_erase = service.getProcess("FeatureCollection.erase").execute(nature_erase, ecology)
+slope_intersection = service.getProcess("FeatureCollection.intersection").execute(ecology_erase, slope_morethan15) #流出4
+slope_erase = service.getProcess("FeatureCollection.erase").execute(ecology_erase, slope_morethan15)
+
+#筛选细碎化耕地
+cultivated1_area = service.getProcess("FeatureCollection.area").execute(slope_erase) #增加area字段
+cultivated1_lessthan5 = service.getProcess("FeatureCollection.filterMetadata").execute(cultivated1_area, "area", "less_than", 3333.3333)
+cultivated1_buffer = service.getProcess("FeatureCollection.buffer").execute(cultivated1_lessthan5, 10)
+cultivated1_join = service.getProcess("FeatureCollection.spatialJoinOneToOne").execute(cultivated1_buffer, cultivated1_area, "buffer", "geom", True, "Intersects", ["area"], ["sum"])
+cultivated1_subtract = service.getProcess("FeatureCollection.subtract").execute(cultivated1_join, "area_sum", "area", "area_peri")
+deprecated1 = service.getProcess("FeatureCollection.filterMetadata").execute(cultivated1_subtract, "area_peri", "less_than", "6666.6667") #流出5
+
+deprecated = service.getProcess("FeatureCollection.mergeAll").execute([urban_intersection,nature_intersection,ecology_intersection,slope_intersection,deprecated1]) #需要流出的耕地
+
+vis_params = ["#808080"]
+deprecated.styles(vis_params).getMap("deprecated")

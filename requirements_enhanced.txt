@@ -1,0 +1,21 @@
+# 基础MCP依赖
+mcp>=1.0.0
+
+# FastMCP框架
+fastmcp>=0.1.0
+
+# HTTP服务器依赖
+starlette>=0.35.0
+uvicorn>=0.20.0
+
+# HTTP客户端
+httpx>=0.25.0
+
+# 数据处理
+pydantic>=2.0.0
+
+# 异步支持
+anyio>=4.0.0
+
+# 原有依赖
+asyncio-mqtt>=0.16.0 
