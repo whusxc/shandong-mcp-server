@@ -40,7 +40,7 @@ MCP_SERVER_NAME = "shandong-cultivated-analysis-enhanced"
 # API配置
 OGE_API_BASE_URL = "http://172.30.22.116:16555/gateway/computation-api/process"
 INTRANET_API_BASE_URL = "http://172.20.70.142:16555/gateway/computation-api/process"
-INTRANET_AUTH_TOKEN = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjMyNCwidXNlcl9uYW1lIjoiZWR1X2FkbWluIiwic2NvcGUiOlsid2ViIl0sImV4cCI6MTc0OTkwNjkwMiwidXVpZCI6ImY5NTBjZmYyLTA3YzgtNDYxYS05YzI0LTkxNjJkNTllMmVmNiIsImF1dGhvcml0aWVzIjpbIkFETUlOSVNUUkFUT1JTIl0sImp0aSI6IkxQbjJQTThlRlpBRDhUNFBxN2U3SWlRdmRGQSIsImNsaWVudF9pZCI6InRlc3QiLCJ1c2VybmFtZSI6ImVkdV9hZG1pbiJ9.jFepdzkcDDlcH0v3Z_Ge35vbiTB3RVt8OQsHJ0o6qEU"
+INTRANET_AUTH_TOKEN = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjMyNCwidXNlcl9uYW1lIjoiZWR1X2FkbWluIiwic2NvcGUiOlsid2ViIl0sImV4cCI6MTc1MDAwMzQ1NiwidXVpZCI6ImY5NTBjZmYyLTA3YzgtNDYxYS05YzI0LTkxNjJkNTllMmVmNiIsImF1dGhvcml0aWVzIjpbIkFETUlOSVNUUkFUT1JTIl0sImp0aSI6IkhrbG9YdDhiMTFmMDJXTFRON3pXc0FkVlk3TSIsImNsaWVudF9pZCI6InRlc3QiLCJ1c2VybmFtZSI6ImVkdV9hZG1pbiJ9.RAaOX2Bzqn0ys8ZpzlsYaVY6RQuYMNwzYXWcJ_9KD8U"
 
 # DAG批处理API配置
 DAG_API_BASE_URL = "http://172.20.70.141/api/oge-dag-22"
@@ -250,20 +250,74 @@ async def coverage_aspect_analysis(
 
 # get_oauth_token 和 refresh_intranet_token 工具已删除
 
+# shandong_farmland_outflow为测试使用，直接返回数据的标识，参数没有用
 @mcp.tool()
-async def run_big_query(
-    query: str,
-    geometry_column: str = "geom",
+async def shandong_farmland_outflow(
+    # query: str = "SELECT * FROM shp_guotubiangeng WHERE DLMC IN ('旱地', '水浇地', '水田')",
+    # name : str = "podu",
     ctx: Context = None
 ) -> str:
     """
-    执行大数据查询 - 基于FeatureCollection.runBigQuery算法
+    进行山东耕地流出的分析,只会返回数据的标识，通过标识后续可以访问结果数据
     
     Parameters:
-    - query: SQL查询语句
-    - geometry_column: 几何列名称，默认为"geom"
+    - query: 矢量的SQL查询语句
+    - name: 地区的坡度数据表名
+    """
+    operation = "山东耕地流出"
+    
+    try:
+        if ctx:
+            await ctx.session.send_log_message("info", f"开始执行{operation}...")
+        
+        logger.info(f"开始执行{operation}")
+        # 本工具为测试，直接返回数据标识
+        
+        if ctx:
+            await ctx.session.send_log_message("info", f"{operation}执行完成")
+        
+        api_result={
+            "code": 20000,
+            "msg": "操作成功",
+            "data": {
+                "processId": "f950cff2-07c8-461a-9c24-9162d59e2ef6_1749970088021_3012",
+                "status": "success"
+            }
+        }
+        result = Result.succ(
+                data=api_result,
+                msg=f"{operation}执行成功",
+                operation=operation,
+                api_endpoint="intranet"
+            )
+        
+        logger.info(f"{operation}执行完成")
+        return result.model_dump_json()
+        
+    except Exception as e:
+        logger.error(f"{operation}执行失败: {str(e)}")
+        result = Result.failed(
+            msg=f"{operation}执行失败: {str(e)}",
+            operation=operation
+        )
+        return result.model_dump_json()
+
+
+@mcp.tool()
+async def run_big_query(
+    # query: str,
+    # geometry_column: str = "geom",
+    ctx: Context = None
+) -> str:
+    """
+    查询山东省耕地矢量,只会返回数据的标识，通过标识后续可以访问结果数据
+    
+    Parameters:
+        无参数
     """
     operation = "大数据查询"
+    query = "SELECT * FROM shp_guotubiangeng WHERE DLMC IN ('旱地', '水浇地', '水田')"
+    geometry_column = "geom"
     
     try:
         if ctx:
