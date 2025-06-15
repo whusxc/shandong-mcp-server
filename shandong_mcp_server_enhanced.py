@@ -182,27 +182,44 @@ async def call_api_with_timing(
     json_data: dict = None,
     headers: dict = None,
     timeout: int = 120,
-    auto_retry_on_token_expire: bool = True
+    auto_retry_on_token_expire: bool = True,
+    use_intranet_token: bool = False
 ) -> tuple[dict, float]:
     """通用API调用，带性能监控和自动token刷新"""
     global INTRANET_AUTH_TOKEN
     start_time = time.perf_counter()
     
-    # 如果headers中包含Authorization且使用的是全局token，则启用自动重试
-    use_global_token = (
-        headers and 
-        headers.get("Authorization") == INTRANET_AUTH_TOKEN and
+    # 如果指定使用内网token，则动态更新headers
+    if use_intranet_token:
+        if headers is None:
+            headers = {"Content-Type": "application/json"}
+        headers["Authorization"] = INTRANET_AUTH_TOKEN
+        logger.info(f"使用内网token: {INTRANET_AUTH_TOKEN[:50]}...")
+    
+    # 检查是否需要自动重试
+    should_auto_retry = (
+        use_intranet_token and 
         auto_retry_on_token_expire
     )
     
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.request(
-                method=method.upper(),
-                url=url,
-                json=json_data,
-                headers=headers or {"Content-Type": "application/json"}
-            )
+            # 处理GET请求的参数
+            if method.upper() == "GET" and headers and "params" in headers:
+                params = headers.pop("params")
+                response = await client.request(
+                    method=method.upper(),
+                    url=url,
+                    params=params,
+                    headers=headers or {"Content-Type": "application/json"}
+                )
+            else:
+                response = await client.request(
+                    method=method.upper(),
+                    url=url,
+                    json=json_data,
+                    headers=headers or {"Content-Type": "application/json"}
+                )
             
             execution_time = time.perf_counter() - start_time
             
@@ -210,7 +227,7 @@ async def call_api_with_timing(
                 result = response.json()
                 
                 # 检查是否为token过期错误
-                if (use_global_token and 
+                if (should_auto_retry and 
                     isinstance(result, dict) and 
                     result.get("code") == 40003):
                     
@@ -220,18 +237,17 @@ async def call_api_with_timing(
                     success, new_token = await refresh_intranet_token()
                     
                     if success:
-                        # 更新headers中的token
-                        headers["Authorization"] = new_token
+                        logger.info("Token刷新成功，重新调用API...")
                         
                         # 重新调用API（递归，但禁用自动重试避免无限循环）
-                        logger.info("使用新token重试API调用...")
                         return await call_api_with_timing(
                             url=url,
                             method=method,
                             json_data=json_data,
-                            headers=headers,
+                            headers=None,  # 重置headers，让函数重新构建
                             timeout=timeout,
-                            auto_retry_on_token_expire=False  # 禁用重试避免循环
+                            auto_retry_on_token_expire=False,  # 禁用重试避免循环
+                            use_intranet_token=use_intranet_token
                         )
                     else:
                         logger.error(f"Token刷新失败: {new_token}")
@@ -349,15 +365,10 @@ async def coverage_aspect_analysis(
             "dockerImageSource": "DOCKER_HUB"
         }
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": INTRANET_AUTH_TOKEN
-        }
-        
         api_result, execution_time = await call_api_with_timing(
             url=INTRANET_API_BASE_URL,
             json_data=api_payload,
-            headers=headers
+            use_intranet_token=True
         )
         
         if "error" in api_result:
@@ -484,15 +495,10 @@ async def run_big_query(
             "dockerImageSource": "DOCKER_HUB"
         }
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": INTRANET_AUTH_TOKEN
-        }
-        
         api_result, execution_time = await call_api_with_timing(
             url=INTRANET_API_BASE_URL,
             json_data=api_payload,
-            headers=headers
+            use_intranet_token=True
         )
         
         if "error" in api_result:
@@ -560,18 +566,17 @@ async def execute_code_to_dag(
             "sampleName": sample_name
         }
         
-        # 构建请求头
-        headers = {
-            "Content-Type": "application/json"
-        }
+        # 准备认证
+        use_custom_token = bool(auth_token)
+        final_headers = None
         
-        # 使用提供的token或全局token
-        if auth_token:
+        if use_custom_token:
             if not auth_token.startswith("Bearer "):
                 auth_token = f"Bearer {auth_token}"
-            headers["Authorization"] = auth_token
-        elif INTRANET_AUTH_TOKEN:
-            headers["Authorization"] = INTRANET_AUTH_TOKEN
+            final_headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth_token
+            }
         
         logger.info(f"调用API: {api_url}")
         logger.info(f"请求数据: userId={user_id}, sampleName={sample_name}")
@@ -581,8 +586,9 @@ async def execute_code_to_dag(
             url=api_url,
             method="POST",
             json_data=request_data,
-            headers=headers,
-            timeout=120
+            headers=final_headers,
+            timeout=120,
+            use_intranet_token=not use_custom_token
         )
         
         if "error" not in api_result:
@@ -696,18 +702,17 @@ async def submit_batch_task(
             "script": script
         }
         
-        # 构建请求头
-        headers = {
-            "Content-Type": "application/json"
-        }
+        # 准备认证
+        use_custom_token = bool(auth_token)
+        final_headers = None
         
-        # 使用提供的token或全局token
-        if auth_token:
+        if use_custom_token:
             if not auth_token.startswith("Bearer "):
                 auth_token = f"Bearer {auth_token}"
-            headers["Authorization"] = auth_token
-        elif INTRANET_AUTH_TOKEN:
-            headers["Authorization"] = INTRANET_AUTH_TOKEN
+            final_headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth_token
+            }
         
         logger.info(f"调用API: {api_url}")
         logger.info(f"请求数据: taskName={task_name}, dagId={dag_id}")
@@ -717,8 +722,9 @@ async def submit_batch_task(
             url=api_url,
             method="POST",
             json_data=request_data,
-            headers=headers,
-            timeout=120
+            headers=final_headers,
+            timeout=120,
+            use_intranet_token=not use_custom_token
         )
         
         if "error" not in api_result:
@@ -800,43 +806,87 @@ async def query_task_status(
         # 构建API URL
         api_url = f"{DAG_API_BASE_URL}/getState"
         
-        # 构建请求头
-        headers = {
-            "Content-Type": "application/json"
-        }
+        # 准备认证
+        use_custom_token = bool(auth_token)
+        final_headers = None
         
-        # 使用提供的token或全局token
-        if auth_token:
+        if use_custom_token:
             if not auth_token.startswith("Bearer "):
                 auth_token = f"Bearer {auth_token}"
-            headers["Authorization"] = auth_token
-        elif INTRANET_AUTH_TOKEN:
-            headers["Authorization"] = INTRANET_AUTH_TOKEN
+            final_headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth_token
+            }
         
         # 构建查询参数
         params = {"dagId": dag_id}
         
         logger.info(f"调用API: {api_url}?dagId={dag_id}")
         
-        # 调用API
-        start_time = time.perf_counter()
-        
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(
-                api_url,
-                params=params,
-                headers=headers
+        # 调用API - 需要特殊处理GET请求
+        if use_custom_token:
+            # 使用自定义token
+            start_time = time.perf_counter()
+            
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    api_url,
+                    params=params,
+                    headers=final_headers
+                )
+                
+                execution_time = time.perf_counter() - start_time
+                
+                if response.status_code == 200:
+                    # API返回的可能是简单的字符串状态
+                    try:
+                        status_data = response.json()
+                    except:
+                        # 如果不是JSON，则是纯文本状态
+                        status_data = response.text.strip()
+                    
+                    result_data = {
+                        "dag_id": dag_id,
+                        "status": status_data,
+                        "is_completed": status_data in ["success", "completed"],
+                        "is_running": status_data in ["running", "starting"],
+                        "is_failed": status_data in ["failed", "error"],
+                        "raw_response": status_data
+                    }
+                    
+                    result = Result.succ(
+                        data=result_data,
+                        msg=f"{operation}成功，当前状态: {status_data}",
+                        operation=operation,
+                        execution_time=execution_time,
+                        api_endpoint="dag"
+                    )
+                    
+                    logger.info(f"{operation}成功 - DAG ID: {dag_id}, 状态: {status_data}")
+                    
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text}"
+                    result = Result.failed(
+                        msg=f"{operation}失败: {error_msg}",
+                        operation=operation
+                    )
+                    logger.error(f"{operation}失败 - {error_msg}")
+        else:
+            # 使用内网token - 转换为POST请求以支持token刷新
+            get_params = {"dagId": dag_id}
+            
+            api_result, execution_time = await call_api_with_timing(
+                url=api_url,
+                method="GET",
+                headers={"params": get_params},  # 传递GET参数
+                timeout=30,
+                use_intranet_token=True
             )
             
-            execution_time = time.perf_counter() - start_time
-            
-            if response.status_code == 200:
-                # API返回的可能是简单的字符串状态
-                try:
-                    status_data = response.json()
-                except:
-                    # 如果不是JSON，则是纯文本状态
-                    status_data = response.text.strip()
+            if "error" not in api_result:
+                status_data = api_result
+                if isinstance(status_data, dict):
+                    status_data = status_data.get("status", "unknown")
                 
                 result_data = {
                     "dag_id": dag_id,
@@ -858,12 +908,11 @@ async def query_task_status(
                 logger.info(f"{operation}成功 - DAG ID: {dag_id}, 状态: {status_data}")
                 
             else:
-                error_msg = f"HTTP {response.status_code}: {response.text}"
                 result = Result.failed(
-                    msg=f"{operation}失败: {error_msg}",
+                    msg=f"{operation}失败: {api_result.get('error')}",
                     operation=operation
                 )
-                logger.error(f"{operation}失败 - {error_msg}")
+                logger.error(f"{operation}失败 - {api_result.get('error')}")
         
         if ctx:
             await ctx.session.send_log_message("info", f"{operation}执行完成，耗时{execution_time:.2f}秒")
