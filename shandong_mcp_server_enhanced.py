@@ -228,7 +228,22 @@ async def call_api_with_timing(
             execution_time = time.perf_counter() - start_time
             
             if response.status_code == 200:
-                result = response.json()
+                # 安全处理JSON解析
+                response_text = response.text.strip()
+                try:
+                    result = response.json()
+                except Exception as json_error:
+                    # 如果JSON解析失败，返回原始文本作为结果
+                    logger.info(f"响应不是JSON格式，作为纯文本处理: {response_text[:100]}...")
+                    # 对于DAG状态查询，直接返回文本状态
+                    if "/getState" in url:
+                        result = response_text if response_text else "unknown"
+                    else:
+                        result = {
+                            "raw_text": response_text,
+                            "json_parse_error": str(json_error),
+                            "content_type": response.headers.get("content-type", "unknown")
+                        }
                 
                 # 检查是否为token过期错误
                 if (should_auto_retry and 
@@ -535,48 +550,134 @@ async def coverage_aspect_analysis(
 
 # get_oauth_token 和 refresh_intranet_token 工具已删除
 
-# shandong_farmland_outflow为测试使用，直接返回数据的标识，参数没有用
 @mcp.tool()
 async def shandong_farmland_outflow(
-    # query: str = "SELECT * FROM shp_guotubiangeng WHERE DLMC IN ('旱地', '水浇地', '水田')",
-    # name : str = "podu",
+    region_id: str = "ASTGTM_N28E056",
+    product_id: str = "ASTER_GDEM_DEM30", 
+    center_lon: float = 56.25,
+    center_lat: float = 28.40,
+    zoom_level: int = 11,
+    wait_for_completion: bool = False,  # 默认立即返回，避免超时
     ctx: Context = None
 ) -> str:
     """
-    进行山东耕地流出的分析,只会返回数据的标识，通过标识后续可以访问结果数据
+    山东耕地流出分析 - 基于DEM数据进行坡向分析和可视化
+    
+    执行完整的耕地流出分析工作流，包括数据获取、坡向计算、可视化和导出
+    
+    工作流程：
+    1. 提交任务（立即返回DAG ID）
+    2. 使用返回的DAG ID调用 query_task_status 查询进度
+    3. 重复查询直到任务完成
     
     Parameters:
-    - query: 矢量的SQL查询语句
-    - name: 地区的坡度数据表名
+    - region_id: DEM数据区域ID (默认: ASTGTM_N28E056)
+    - product_id: 产品数据源ID (默认: ASTER_GDEM_DEM30)
+    - center_lon: 地图中心经度 (默认: 56.25)
+    - center_lat: 地图中心纬度 (默认: 28.40)
+    - zoom_level: 地图缩放级别 (默认: 11)
+    - wait_for_completion: 是否等待任务完成 (默认: False，立即返回避免超时)
+    
+    返回信息包含：
+    - 任务状态和DAG ID
+    - 下一步操作指引
+    - 查询状态的具体参数
     """
-    operation = "山东耕地流出"
+    operation = "山东耕地流出分析"
     
     try:
         if ctx:
             await ctx.session.send_log_message("info", f"开始执行{operation}...")
         
-        logger.info(f"开始执行{operation}")
-        # 本工具为测试，直接返回数据标识
+        logger.info(f"开始执行{operation} - 区域: {region_id}, 产品: {product_id}")
+        
+        # 构建OGE代码
+        oge_code = f"""import oge
+
+oge.initialize()
+service = oge.Service()
+
+dem = service.getCoverage(coverageID="{region_id}", productID="{product_id}")
+aspect = service.getProcess("Coverage.aspect").execute(dem, 1)
+
+vis_params = {{"min": -1, "max": 1, "palette": ["#808080", "#949494", "#a9a9a9", "#bdbebd", "#d3d3d3","#e9e9e9"]}}
+aspect.styles(vis_params).export("aspect")
+oge.mapclient.centerMap({center_lon}, {center_lat}, {zoom_level})"""
+        
+        logger.info(f"生成的OGE代码长度: {len(oge_code)} 字符")
+        
+        # 调用execute_dag_workflow执行完整工作流
+        workflow_result = await execute_dag_workflow(
+            code=oge_code,
+            task_name="shandong_farmland_outflow_analysis",
+            filename="shandong_aspect_analysis",
+            auto_submit=True,
+            wait_for_completion=wait_for_completion,
+            check_interval=10,          # 每10秒轮询一次
+            max_wait_time=1800,         # 30分钟超时
+            ctx=ctx
+        )
+        
+        # 解析workflow结果
+        import json
+        workflow_data = json.loads(workflow_result)
+        
+        if workflow_data.get("success"):
+            # 提取关键信息
+            workflow_details = workflow_data.get("data", {})
+            final_status = workflow_details.get("final_status", "unknown")
+            
+            result_data = {
+                "region_id": region_id,
+                "product_id": product_id,
+                "analysis_type": "aspect_analysis",
+                "map_center": {"lon": center_lon, "lat": center_lat, "zoom": zoom_level},
+                "workflow_status": final_status,
+                "execution_steps": workflow_details.get("steps", []),
+                "execution_times": workflow_details.get("execution_times", {}),
+                "dag_info": {
+                    "dag_ids": workflow_details.get("dag_ids", []),
+                    "primary_dag_id": workflow_details.get("dag_ids", ["unknown"])[0],
+                    "task_name": "shandong_farmland_outflow_analysis"
+                },
+                "next_action": {
+                    "tool_name": "query_task_status",
+                    "parameters": {
+                        "dag_id": workflow_details.get("dag_ids", ["unknown"])[0]
+                    },
+                    "description": "查询任务执行状态"
+                } if final_status == "submitted" else None
+            }
+            
+            if final_status == "completed":
+                msg = f"{operation}执行成功 - DEM坡向分析已完成并可视化"
+            elif final_status == "submitted":
+                primary_dag_id = workflow_details.get("dag_ids", ["unknown"])[0]
+                msg = f"{operation}任务已提交 - DAG ID: {primary_dag_id}\n" + \
+                      f"💡 请使用以下命令查询进度：\n" + \
+                      f"query_task_status(dag_id=\"{primary_dag_id}\")"
+            else:
+                msg = f"{operation}执行完成 - 状态: {final_status}"
+            
+            result = Result.succ(
+                data=result_data,
+                msg=msg,
+                operation=operation,
+                api_endpoint="dag_workflow"
+            )
+        else:
+            # 工作流执行失败
+            error_msg = workflow_data.get("msg", "工作流执行失败")
+            result = Result.failed(
+                msg=f"{operation}失败: {error_msg}",
+                operation=operation
+            )
+            result.data = workflow_data.get("data")
         
         if ctx:
             await ctx.session.send_log_message("info", f"{operation}执行完成")
         
-        api_result={
-            "code": 20000,
-            "msg": "操作成功",
-            "data": {
-                "processId": "f950cff2-07c8-461a-9c24-9162d59e2ef6_1749970088021_3012",
-                "status": "success"
-            }
-        }
-        result = Result.succ(
-                data=api_result,
-                msg=f"{operation}执行成功",
-                operation=operation,
-                api_endpoint="intranet"
-            )
-        
-        logger.info(f"{operation}执行完成")
+        logger.info(f"{operation}执行完成 - 最终状态: {final_status}")
         return result.model_dump_json()
         
     except Exception as e:
@@ -718,7 +819,7 @@ async def execute_code_to_dag(
             method="POST",
             json_data=request_data,
             headers=final_headers,
-            timeout=120,
+            timeout=300,     # 5分钟超时，DAG创建可能需要更长时间
             use_intranet_token=not use_custom_token
         )
         
@@ -854,7 +955,7 @@ async def submit_batch_task(
             method="POST",
             json_data=request_data,
             headers=final_headers,
-            timeout=120,
+            timeout=300,     # 5分钟超时，任务提交可能需要更长时间
             use_intranet_token=not use_custom_token
         )
         
@@ -970,19 +1071,32 @@ async def query_task_status(
                 
                 if response.status_code == 200:
                     # API返回的可能是简单的字符串状态
-                    try:
-                        status_data = response.json()
-                    except:
-                        # 如果不是JSON，则是纯文本状态
-                        status_data = response.text.strip()
+                    response_text = response.text.strip()
+                    
+                    if not response_text:
+                        # 空响应，可能表示任务不存在或查询出错
+                        status_data = "unknown"
+                    else:
+                        try:
+                            status_data = response.json()
+                        except:
+                            # 如果不是JSON，则是纯文本状态
+                            status_data = response_text
+                    
+                    # 确保status_data是字符串形式
+                    if isinstance(status_data, dict):
+                        status_str = status_data.get("status", str(status_data))
+                    else:
+                        status_str = str(status_data)
                     
                     result_data = {
                         "dag_id": dag_id,
-                        "status": status_data,
-                        "is_completed": status_data in ["success", "completed"],
-                        "is_running": status_data in ["running", "starting"],
-                        "is_failed": status_data in ["failed", "error"],
-                        "raw_response": status_data
+                        "status": status_str,
+                        "is_completed": status_str in ["success", "completed"],
+                        "is_running": status_str in ["running", "starting"],
+                        "is_failed": status_str in ["failed", "error"],
+                        "raw_response": status_data,
+                        "response_length": len(response_text)
                     }
                     
                     result = Result.succ(
@@ -1072,8 +1186,8 @@ async def execute_dag_workflow(
     auth_token: str = None,
     auto_submit: bool = True,
     wait_for_completion: bool = False,
-    check_interval: int = 10,
-    max_wait_time: int = 300,
+    check_interval: int = 15,     # 默认15秒检查一次
+    max_wait_time: int = 1800,    # 默认30分钟超时
     ctx: Context = None
 ) -> str:
     """
@@ -1401,6 +1515,88 @@ def run_http_server(host: str = "0.0.0.0", port: int = 8000):
     starlette_app = create_starlette_app(mcp_server, debug=True)
     
     uvicorn.run(starlette_app, host=host, port=port)
+
+# 在文件末尾添加测试工具
+
+@mcp.tool()
+async def test_dag_status_api(
+    dag_id: str,
+    ctx: Context = None
+) -> str:
+    """
+    测试DAG状态查询API - 直接调用不经过封装
+    
+    用于诊断query_task_status的问题
+    """
+    operation = "测试DAG状态API"
+    
+    try:
+        if ctx:
+            await ctx.session.send_log_message("info", f"开始执行{operation}...")
+        
+        logger.info(f"开始执行{operation} - DAG ID: {dag_id}")
+        
+        # 构建API URL
+        api_url = f"{DAG_API_BASE_URL}/getState"
+        params = {"dagId": dag_id}
+        
+        logger.info(f"测试API调用: {api_url}?dagId={dag_id}")
+        
+        start_time = time.perf_counter()
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(
+                api_url,
+                params=params,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": INTRANET_AUTH_TOKEN
+                }
+            )
+            
+            execution_time = time.perf_counter() - start_time
+            
+            # 详细记录响应信息
+            response_info = {
+                "status_code": response.status_code,
+                "headers": dict(response.headers),
+                "content_length": len(response.content),
+                "text_preview": response.text[:200] if response.text else "Empty",
+                "is_json": False,
+                "execution_time": execution_time
+            }
+            
+            # 尝试解析JSON
+            json_data = None
+            try:
+                json_data = response.json()
+                response_info["is_json"] = True
+                response_info["json_data"] = json_data
+            except Exception as e:
+                response_info["json_error"] = str(e)
+            
+            result = Result.succ(
+                data=response_info,
+                msg=f"{operation}完成 - 状态码: {response.status_code}",
+                operation=operation,
+                execution_time=execution_time,
+                api_endpoint="dag_test"
+            )
+            
+            logger.info(f"{operation}完成 - 状态码: {response.status_code}, 内容长度: {len(response.content)}")
+            
+        if ctx:
+            await ctx.session.send_log_message("info", f"{operation}执行完成")
+        
+        return result.model_dump_json()
+        
+    except Exception as e:
+        logger.error(f"{operation}执行失败: {str(e)}")
+        result = Result.failed(
+            msg=f"{operation}执行失败: {str(e)}",
+            operation=operation
+        )
+        return result.model_dump_json()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='山东耕地流出分析MCP服务器 - 增强版')
