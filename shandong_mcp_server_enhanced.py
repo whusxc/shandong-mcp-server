@@ -155,24 +155,27 @@ async def refresh_intranet_token() -> tuple[bool, str]:
                 
                 if 'data' in data and 'token' in data['data']:
                     token = data['data']['token']
-                    token_head = data['data'].get('tokenHead', 'Bearer')
+                    token_head = data['data'].get('tokenHead', 'Bearer').rstrip()  # 去掉尾部空格
                     full_token = f"{token_head} {token}"
                     
                     # 更新全局token
                     INTRANET_AUTH_TOKEN = full_token
                     
                     logger.info(f"Token刷新成功: {full_token[:50]}...")
+                    logger.info(f"Token格式检查 - head: '{token_head}', length: {len(full_token)}")
                     return True, full_token
                 else:
                     logger.error(f"Token响应格式异常: {data}")
-                    return False, "Token响应格式异常"
+                    return False, f"Token响应格式异常: {data}"
             else:
-                logger.error(f"Token获取失败 - 状态码: {response.status_code} - 响应: {response.text}")
-                return False, f"HTTP {response.status_code}: {response.text}"
+                error_msg = f"Token获取失败 - 状态码: {response.status_code} - 响应: {response.text}"
+                logger.error(error_msg)
+                return False, error_msg
                 
     except Exception as e:
-        logger.error(f"Token刷新异常: {str(e)}")
-        return False, str(e)
+        error_msg = f"Token刷新异常: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 
 # ============ 通用API调用函数 ============
 
@@ -195,6 +198,7 @@ async def call_api_with_timing(
             headers = {"Content-Type": "application/json"}
         headers["Authorization"] = INTRANET_AUTH_TOKEN
         logger.info(f"使用内网token: {INTRANET_AUTH_TOKEN[:50]}...")
+        logger.info(f"实际发送headers: {dict((k, v[:50] + '...' if k == 'Authorization' and len(v) > 50 else v) for k, v in headers.items())}")
     
     # 检查是否需要自动重试
     should_auto_retry = (
@@ -239,15 +243,23 @@ async def call_api_with_timing(
                     if success:
                         logger.info("Token刷新成功，重新调用API...")
                         
+                        # 确保使用新token重新构建headers
+                        new_headers = None
+                        if use_intranet_token:
+                            new_headers = {
+                                "Content-Type": "application/json",
+                                "Authorization": new_token
+                            }
+                        
                         # 重新调用API（递归，但禁用自动重试避免无限循环）
                         return await call_api_with_timing(
                             url=url,
                             method=method,
                             json_data=json_data,
-                            headers=None,  # 重置headers，让函数重新构建
+                            headers=new_headers,
                             timeout=timeout,
                             auto_retry_on_token_expire=False,  # 禁用重试避免循环
-                            use_intranet_token=use_intranet_token
+                            use_intranet_token=False  # 已经手动设置headers了，不需要再次设置
                         )
                     else:
                         logger.error(f"Token刷新失败: {new_token}")
@@ -256,8 +268,44 @@ async def call_api_with_timing(
                 
                 api_logger.info(f"API调用成功 - URL: {url} - 耗时: {execution_time:.4f}s")
                 return result, execution_time
+            elif response.status_code == 401 and should_auto_retry:
+                # 处理HTTP 401状态码（认证失败）
+                logger.warning("检测到401状态码，尝试自动刷新token...")
+                
+                # 刷新token
+                success, new_token = await refresh_intranet_token()
+                
+                if success:
+                    logger.info("Token刷新成功，重新调用API...")
+                    
+                    # 确保使用新token重新构建headers
+                    new_headers = None
+                    if use_intranet_token:
+                        new_headers = {
+                            "Content-Type": "application/json",
+                            "Authorization": new_token
+                        }
+                    
+                    # 重新调用API（递归，但禁用自动重试避免无限循环）
+                    return await call_api_with_timing(
+                        url=url,
+                        method=method,
+                        json_data=json_data,
+                        headers=new_headers,
+                        timeout=timeout,
+                        auto_retry_on_token_expire=False,  # 禁用重试避免循环
+                        use_intranet_token=False  # 已经手动设置headers了，不需要再次设置
+                    )
+                else:
+                    logger.error(f"Token刷新失败: {new_token}")
+                    api_logger.error(f"API调用失败(token刷新失败) - URL: {url}")
+                    return {"error": f"401认证失败且token刷新失败: {new_token}", "status_code": 401}, execution_time
             else:
-                api_logger.error(f"API调用失败 - URL: {url} - 状态码: {response.status_code} - 耗时: {execution_time:.4f}s")
+                error_detail = f"API调用失败 - URL: {url} - 状态码: {response.status_code} - 耗时: {execution_time:.4f}s"
+                if response.status_code == 401:
+                    current_token_preview = INTRANET_AUTH_TOKEN[:30] + "..." if INTRANET_AUTH_TOKEN else "None"
+                    error_detail += f" - 当前token预览: {current_token_preview}"
+                api_logger.error(error_detail)
                 return {"error": response.text, "status_code": response.status_code}, execution_time
                 
     except Exception as e:
@@ -318,7 +366,87 @@ async def refresh_token(ctx: Context = None) -> str:
         )
         return result.model_dump_json()
 
-# execute_full_workflow 工具已删除
+@mcp.tool()
+async def check_token_status(ctx: Context = None) -> str:
+    """
+    检查当前内网认证Token状态
+    
+    用于调试token问题，显示当前token的信息
+    """
+    global INTRANET_AUTH_TOKEN
+    operation = "检查Token状态"
+    
+    try:
+        if ctx:
+            await ctx.session.send_log_message("info", f"开始执行{operation}...")
+        
+        logger.info(f"开始执行{operation}")
+        
+        if INTRANET_AUTH_TOKEN:
+            # 尝试解析JWT token的有效期（如果是JWT格式）
+            token_info = {
+                "has_token": True,
+                "token_preview": INTRANET_AUTH_TOKEN[:50] + "...",
+                "token_length": len(INTRANET_AUTH_TOKEN),
+                "starts_with_bearer": INTRANET_AUTH_TOKEN.startswith("Bearer "),
+                "has_double_space": "Bearer  " in INTRANET_AUTH_TOKEN,  # 检测双空格问题
+                "current_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "bearer_prefix_length": len(INTRANET_AUTH_TOKEN.split(' ')[0]) if ' ' in INTRANET_AUTH_TOKEN else 0
+            }
+            
+            # 如果是JWT token，尝试解析过期时间
+            if "Bearer " in INTRANET_AUTH_TOKEN:
+                jwt_part = INTRANET_AUTH_TOKEN.replace("Bearer ", "")
+                try:
+                    import base64
+                    import json
+                    # 简单解析JWT payload（不验证签名）
+                    parts = jwt_part.split('.')
+                    if len(parts) >= 2:
+                        # 添加padding如果需要
+                        payload = parts[1]
+                        payload += '=' * (4 - len(payload) % 4)
+                        decoded = base64.b64decode(payload)
+                        payload_data = json.loads(decoded)
+                        
+                        if 'exp' in payload_data:
+                            exp_time = payload_data['exp']
+                            exp_readable = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(exp_time))
+                            token_info["expires_at"] = exp_readable
+                            token_info["expires_timestamp"] = exp_time
+                            token_info["is_expired"] = time.time() > exp_time
+                        
+                        if 'user_name' in payload_data:
+                            token_info["username"] = payload_data['user_name']
+                            
+                except Exception as e:
+                    token_info["parse_error"] = str(e)
+            
+            result = Result.succ(
+                data=token_info,
+                msg=f"{operation}成功",
+                operation=operation,
+                api_endpoint="debug"
+            )
+        else:
+            result = Result.failed(
+                msg=f"{operation}: 当前没有token",
+                operation=operation
+            )
+        
+        if ctx:
+            await ctx.session.send_log_message("info", f"{operation}执行完成")
+        
+        logger.info(f"{operation}执行完成")
+        return result.model_dump_json()
+        
+    except Exception as e:
+        logger.error(f"{operation}执行失败: {str(e)}")
+        result = Result.failed(
+            msg=f"{operation}执行失败: {str(e)}",
+            operation=operation
+        )
+        return result.model_dump_json()
 
 @mcp.tool()
 async def coverage_aspect_analysis(
@@ -502,8 +630,10 @@ async def run_big_query(
         )
         
         if "error" in api_result:
+            error_detail = api_result.get('error', '未知错误')
+            status_code = api_result.get('status_code', '未知状态码')
             result = Result.failed(
-                msg=f"{operation}失败: {api_result.get('error')}",
+                msg=f"{operation}失败: {error_detail} (状态码: {status_code})",
                 operation=operation
             )
         else:
@@ -528,6 +658,7 @@ async def run_big_query(
             operation=operation
         )
         return result.model_dump_json()
+
 
 # ============ DAG批处理工具 ============
 
@@ -1190,7 +1321,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
         return JSONResponse({
             "server_name": MCP_SERVER_NAME,
             "version": "2.4.0",
-            "description": "山东耕地流出分析MCP服务器 - 增强版 (8个核心工具 + 自动Token管理)",
+            "description": "山东耕地流出分析MCP服务器 - 增强版 (9个核心工具 + 自动Token管理)",
             "features": [
                 "自动Token刷新",
                 "手动Token刷新",
@@ -1212,6 +1343,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
             },
             "available_tools": [
                 "refresh_token",
+                "check_token_status",
                 "coverage_aspect_analysis", 
                 "shandong_farmland_outflow",
                 "run_big_query",
